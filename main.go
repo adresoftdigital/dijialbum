@@ -17,7 +17,6 @@ import (
 
 var ctx = context.Background()
 
-// Veritabanı Modelleri
 type Album struct {
 	ID            string    `json:"id"`
 	Title         string    `json:"title"`
@@ -79,33 +78,43 @@ func main() {
 			log.Println("⚡ Upstash Redis bağlantısı yapılandırıldı.")
 		}
 	} else {
-		log.Println("⚠️ REDIS_URL bulunamadı, sistem sadece Supabase ile çalışacak.")
+		log.Println("⚠️ REDIS_URL bulunamadı, doğrudan Supabase ile çalışılıyor.")
 	}
 
 	app := &App{DB: db, RDB: rdb}
 
-	// CORS ve Handler Tanımlamaları
-	http.HandleFunc("/api/v1/albums/hot", app.corsMiddleware(app.getHotAlbumsHandler))
-	http.HandleFunc("/api/v1/album-detail", app.corsMiddleware(app.getAlbumDetailHandler))
+	// Router Tanımlama
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/albums/hot", app.getHotAlbumsHandler)
+	mux.HandleFunc("/api/v1/album-detail", app.getAlbumDetailHandler)
 
-	port := ":8080"
-	fmt.Printf("🚀 Go Backend Sunucusu %s portunda çalışıyor...\n", port)
-	log.Fatal(http.ListenAndServe(port, nil))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	fmt.Printf("🚀 Go Sunucusu Render üzerinde :%s portunda aktif...\n", port)
+
+	// TÜM router'ı kapsayan Global CORS Katmanı
+	log.Fatal(http.ListenAndServe(":"+port, enableCORS(mux)))
 }
 
-// CORS Ayarı (Flutter Web / Desktop / Mobile erişimi için)
-func (app *App) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+// Global CORS Middleware - Preflight (OPTIONS) isteklerini anında onaylar
+func enableCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 
+		// Preflight kontrolü ise 200 OK dönüp işlemi bitir
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		next(w, r)
-	}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (app *App) getHotAlbumsHandler(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +140,7 @@ func (app *App) getHotAlbumsHandler(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := app.DB.Query(query)
 	if err != nil {
-		http.Error(w, "Veri çekme hatası: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, `{"status":"error","message":"Veri çekme hatası"}`, http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -163,13 +172,12 @@ func (app *App) getHotAlbumsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonBytes)
 }
 
-// ALBÜM DETAY VE SAYFALAMALI MEDYA ÇEKME HANDLER'I
 func (app *App) getAlbumDetailHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	albumID := r.URL.Query().Get("album_id")
 	if albumID == "" {
-		http.Error(w, `{"status":"error","message":"album_id parametresi zorunludur"}`, http.StatusBadRequest)
+		http.Error(w, `{"status":"error","message":"album_id parametresi eksik"}`, http.StatusBadRequest)
 		return
 	}
 
@@ -184,10 +192,8 @@ func (app *App) getAlbumDetailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	offset := (page - 1) * limit
-
 	cacheKey := fmt.Sprintf("album_detail:%s:page:%d:limit:%d", albumID, page, limit)
 
-	// Redis Cache Kontrolü
 	if app.RDB != nil {
 		cachedData, err := app.RDB.Get(ctx, cacheKey).Result()
 		if err == nil && cachedData != "" {
@@ -197,7 +203,6 @@ func (app *App) getAlbumDetailHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 1. Albüm Temel Bilgisi
 	var album Album
 	albumQuery := `SELECT id, title, COALESCE(cover_photo_url, ''), created_at FROM albums WHERE id = $1`
 	err := app.DB.QueryRow(albumQuery, albumID).Scan(&album.ID, &album.Title, &album.CoverPhotoURL, &album.CreatedAt)
@@ -205,12 +210,11 @@ func (app *App) getAlbumDetailHandler(w http.ResponseWriter, r *http.Request) {
 		if err == sql.ErrNoRows {
 			http.Error(w, `{"status":"error","message":"Albüm bulunamadı"}`, http.StatusNotFound)
 		} else {
-			http.Error(w, `{"status":"error","message":"Veritabanı hatası: `+err.Error()+`"}`, http.StatusInternalServerError)
+			http.Error(w, `{"status":"error","message":"Veritabanı hatası"}`, http.StatusInternalServerError)
 		}
 		return
 	}
 
-	// 2. Medya Listesi (Sayfalanmış)
 	mediaQuery := `
 		SELECT 
 			id, album_id, url, COALESCE(thumbnail_url, ''), COALESCE(title, ''), 
@@ -225,7 +229,7 @@ func (app *App) getAlbumDetailHandler(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := app.DB.Query(mediaQuery, albumID, limit+1, offset)
 	if err != nil {
-		http.Error(w, `{"status":"error","message":"Medya çekme hatası: `+err.Error()+`"}`, http.StatusInternalServerError)
+		http.Error(w, `{"status":"error","message":"Medya sorgu hatası"}`, http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -247,7 +251,7 @@ func (app *App) getAlbumDetailHandler(w http.ResponseWriter, r *http.Request) {
 	hasMore := false
 	if len(mediaList) > limit {
 		hasMore = true
-		mediaList = mediaList[:limit] // Fazladan çekilen kontrol ögesini kes
+		mediaList = mediaList[:limit]
 	}
 
 	responsePayload := AlbumDetailResponse{
@@ -261,7 +265,6 @@ func (app *App) getAlbumDetailHandler(w http.ResponseWriter, r *http.Request) {
 
 	jsonBytes, _ := json.Marshal(responsePayload)
 
-	// Cache'e Kaydet (3 Dakika)
 	if app.RDB != nil {
 		app.RDB.Set(ctx, cacheKey, jsonBytes, 3*time.Minute)
 	}
