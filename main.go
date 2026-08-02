@@ -57,14 +57,18 @@ type App struct {
 func main() {
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
-		log.Fatal("DATABASE_URL ortam değişkeni bulunamadı!")
+		log.Fatal("❌ ERROR: DATABASE_URL ortam değişkeni bulunamadı!")
 	}
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		log.Fatalf("Veritabanı bağlantı hatası: %v", err)
+		log.Fatalf("❌ ERROR: Veritabanı bağlantı hatası: %v", err)
 	}
 	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		log.Fatalf("❌ ERROR: Veritabanına ulaşılamıyor (Ping başarısız): %v", err)
+	}
 
 	redisURL := os.Getenv("REDIS_URL")
 	var rdb *redis.Client
@@ -72,10 +76,10 @@ func main() {
 	if redisURL != "" {
 		opt, err := redis.ParseURL(redisURL)
 		if err != nil {
-			log.Printf("Redis URL ayrıştırma hatası: %v", err)
+			log.Printf("⚠️ WARNING: Redis URL ayrıştırma hatası: %v", err)
 		} else {
 			rdb = redis.NewClient(opt)
-			log.Println("⚡ Upstash Redis bağlantısı yapılandırıldı.")
+			log.Println("⚡ Upstash Redis bağlantısı başarılı.")
 		}
 	} else {
 		log.Println("⚠️ REDIS_URL bulunamadı, doğrudan Supabase ile çalışılıyor.")
@@ -83,7 +87,6 @@ func main() {
 
 	app := &App{DB: db, RDB: rdb}
 
-	// Router Tanımlama
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/albums/hot", app.getHotAlbumsHandler)
 	mux.HandleFunc("/api/v1/album-detail", app.getAlbumDetailHandler)
@@ -93,13 +96,10 @@ func main() {
 		port = "8080"
 	}
 
-	fmt.Printf("🚀 Go Sunucusu Render üzerinde :%s portunda aktif...\n", port)
-
-	// TÜM router'ı kapsayan Global CORS Katmanı
+	fmt.Printf("🚀 Go Sunucusu aktif. Port: %s\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, enableCORS(mux)))
 }
 
-// Global CORS Middleware - Preflight (OPTIONS) isteklerini anında onaylar
 func enableCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -107,7 +107,6 @@ func enableCORS(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 
-		// Preflight kontrolü ise 200 OK dönüp işlemi bitir
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -132,7 +131,7 @@ func (app *App) getHotAlbumsHandler(w http.ResponseWriter, r *http.Request) {
 
 	query := `
 		SELECT id, title, COALESCE(cover_photo_url, ''), created_at
-		FROM albums
+		FROM public.albums
 		WHERE created_at >= NOW() - INTERVAL '3 days'
 		ORDER BY created_at DESC
 		LIMIT 50;
@@ -140,6 +139,7 @@ func (app *App) getHotAlbumsHandler(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := app.DB.Query(query)
 	if err != nil {
+		log.Printf("❌ ERROR [getHotAlbumsHandler] Query Hatası: %v", err)
 		http.Error(w, `{"status":"error","message":"Veri çekme hatası"}`, http.StatusInternalServerError)
 		return
 	}
@@ -149,10 +149,15 @@ func (app *App) getHotAlbumsHandler(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a Album
 		if err := rows.Scan(&a.ID, &a.Title, &a.CoverPhotoURL, &a.CreatedAt); err != nil {
+			log.Printf("❌ ERROR [getHotAlbumsHandler] Row Scan Hatası: %v", err)
 			continue
 		}
 		a.IsHot = true
 		hotAlbums = append(hotAlbums, a)
+	}
+
+	if hotAlbums == nil {
+		hotAlbums = []Album{}
 	}
 
 	responsePayload := map[string]interface{}{
@@ -162,7 +167,12 @@ func (app *App) getHotAlbumsHandler(w http.ResponseWriter, r *http.Request) {
 		"albums": hotAlbums,
 	}
 
-	jsonBytes, _ := json.Marshal(responsePayload)
+	jsonBytes, err := json.Marshal(responsePayload)
+	if err != nil {
+		log.Printf("❌ ERROR [getHotAlbumsHandler] JSON Marshal Hatası: %v", err)
+		http.Error(w, `{"status":"error","message":"JSON hatası"}`, http.StatusInternalServerError)
+		return
+	}
 
 	if app.RDB != nil {
 		app.RDB.Set(ctx, cacheKey, jsonBytes, 5*time.Minute)
@@ -204,31 +214,48 @@ func (app *App) getAlbumDetailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var album Album
-	albumQuery := `SELECT id, title, COALESCE(cover_photo_url, ''), created_at FROM albums WHERE id = $1`
+	albumQuery := `
+		SELECT
+			id,
+			title,
+			COALESCE(cover_photo_url, ''),
+			created_at
+		FROM public.albums
+		WHERE id::text = $1
+		LIMIT 1
+	`
 	err := app.DB.QueryRow(albumQuery, albumID).Scan(&album.ID, &album.Title, &album.CoverPhotoURL, &album.CreatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			http.Error(w, `{"status":"error","message":"Albüm bulunamadı"}`, http.StatusNotFound)
 		} else {
+			log.Printf("❌ ERROR [getAlbumDetailHandler] Album Query Hatası: %v", err)
 			http.Error(w, `{"status":"error","message":"Veritabanı hatası"}`, http.StatusInternalServerError)
 		}
 		return
 	}
 
 	mediaQuery := `
-		SELECT 
-			id, album_id, url, COALESCE(thumbnail_url, ''), COALESCE(title, ''), 
-			COALESCE(is_video, false), COALESCE(is_favorite, false), 
-			COALESCE(width, 0), COALESCE(height, 0), COALESCE(duration, 0), 
-			COALESCE(size, 0), created_at
-		FROM media
-		WHERE album_id = $1
+		SELECT
+			id,
+			album_id,
+			url,
+			COALESCE(thumbnail_url, ''),
+			COALESCE(media_type, 'photo'),
+			COALESCE(width, 0),
+			COALESCE(height, 0),
+			COALESCE(duration_seconds, 0),
+			COALESCE(file_size_bytes, 0),
+			created_at
+		FROM public.media
+		WHERE album_id::text = $1
 		ORDER BY created_at DESC
 		LIMIT $2 OFFSET $3
 	`
 
 	rows, err := app.DB.Query(mediaQuery, albumID, limit+1, offset)
 	if err != nil {
+		log.Printf("❌ ERROR [getAlbumDetailHandler] Media Query Hatası: %v", err)
 		http.Error(w, `{"status":"error","message":"Medya sorgu hatası"}`, http.StatusInternalServerError)
 		return
 	}
@@ -237,15 +264,34 @@ func (app *App) getAlbumDetailHandler(w http.ResponseWriter, r *http.Request) {
 	var mediaList []MediaItem
 	for rows.Next() {
 		var m MediaItem
+		var mediaType string
+
 		err := rows.Scan(
-			&m.ID, &m.AlbumID, &m.URL, &m.ThumbnailURL, &m.Title,
-			&m.IsVideo, &m.IsFavorite, &m.Width, &m.Height,
-			&m.Duration, &m.Size, &m.CreatedAt,
+			&m.ID,
+			&m.AlbumID,
+			&m.URL,
+			&m.ThumbnailURL,
+			&mediaType,
+			&m.Width,
+			&m.Height,
+			&m.Duration,
+			&m.Size,
+			&m.CreatedAt,
 		)
 		if err != nil {
+			log.Printf("❌ ERROR [getAlbumDetailHandler] Media Scan Hatası: %v", err)
 			continue
 		}
+
+		m.Title = ""
+		m.IsFavorite = false
+		m.IsVideo = (mediaType == "video")
+
 		mediaList = append(mediaList, m)
+	}
+
+	if mediaList == nil {
+		mediaList = []MediaItem{}
 	}
 
 	hasMore := false
@@ -263,7 +309,12 @@ func (app *App) getAlbumDetailHandler(w http.ResponseWriter, r *http.Request) {
 		HasMore: hasMore,
 	}
 
-	jsonBytes, _ := json.Marshal(responsePayload)
+	jsonBytes, err := json.Marshal(responsePayload)
+	if err != nil {
+		log.Printf("❌ ERROR [getAlbumDetailHandler] JSON Marshal Hatası: %v", err)
+		http.Error(w, `{"status":"error","message":"JSON oluşturma hatası"}`, http.StatusInternalServerError)
+		return
+	}
 
 	if app.RDB != nil {
 		app.RDB.Set(ctx, cacheKey, jsonBytes, 3*time.Minute)
