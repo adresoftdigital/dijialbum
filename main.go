@@ -88,6 +88,17 @@ func main() {
 	app := &App{DB: db, RDB: rdb}
 
 	mux := http.NewServeMux()
+
+	// ✅ Root Endpoint: Render Health Check ve Tarayıcı Doğrulama
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok","message":"DijiAlbum Go API Aktif"}`))
+	})
+
 	mux.HandleFunc("/api/v1/albums/hot", app.getHotAlbumsHandler)
 	mux.HandleFunc("/api/v1/album-detail", app.getAlbumDetailHandler)
 
@@ -96,7 +107,7 @@ func main() {
 		port = "8080"
 	}
 
-	fmt.Printf("🚀 Go Sunucusu aktif. Port: %s\n", port)
+	fmt.Printf("🚀 Go Sunucusu Render üzerinde :%s portunda aktif...\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, enableCORS(mux)))
 }
 
