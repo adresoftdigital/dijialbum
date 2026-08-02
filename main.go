@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -9,42 +10,30 @@ import (
 	"os"
 	"time"
 
-	_ "github.com/lib/pq" // PostgreSQL Sürücüsü
+	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 )
 
-// Albüm Veri Yapısı (Struct)
-// Neden json etiketleri var?: Go dilindeki büyük harfli değişken adlarını
-// Flutter'ın anlayacağı küçük harfli JSON formatına dönüştürmek için (`json:"title"`)
+var ctx = context.Background()
+
 type Album struct {
 	ID            string    `json:"id"`
 	Title         string    `json:"title"`
 	CoverPhotoURL string    `json:"cover_photo_url"`
 	CreatedAt     time.Time `json:"created_at"`
-	IsHot         bool      `json:"is_hot"` // Mobil uygulamaya bu verinin sıcak olup olmadığını bildirir
-}
-
-// Fotoğraf ve Video Veri Yapısı
-type Media struct {
-	ID              string `json:"id"`
-	AlbumID         string `json:"album_id"`
-	URL             string `json:"url"`
-	ThumbnailURL    string `json:"thumbnail_url"`
-	MediaType       string `json:"media_type"` // 'photo' veya 'video'
-	DurationSeconds int    `json:"duration_seconds"`
-	Width           int    `json:"width"`
-	Height          int    `json:"height"`
+	IsHot         bool      `json:"is_hot"`
 }
 
 type App struct {
-	DB *sql.DB
+	DB  *sql.DB
+	RDB *redis.Client
 }
 
 func main() {
-	// Supabase PostgreSQL Bağlantı Cümlesi
-	// Render veya local ortamdan gelen DATABASE_URL'i okur
+	// 1. Supabase Bağlantısı
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
-		log.Fatal("DATABASE_URL çevre değişkeni tanımlanmamış!")
+		log.Fatal("DATABASE_URL ortam değişkeni bulunamadı!")
 	}
 
 	db, err := sql.Open("postgres", connStr)
@@ -53,23 +42,47 @@ func main() {
 	}
 	defer db.Close()
 
-	app := &App{DB: db}
+	// 2. Upstash Redis Bağlantısı
+	redisURL := os.Getenv("REDIS_URL")
+	var rdb *redis.Client
 
-	// API Rotaları (HTTP Endpoints)
-	http.HandleFunc("/api/v1/albums/hot", app.getHotAlbumsHandler)   // 1. Sıcak Albümler
-	http.HandleFunc("/api/v1/albums/cold", app.getColdAlbumsHandler) // 2. Soğuk Albümler
-	http.HandleFunc("/api/v1/album/media", app.getAlbumMediaHandler) // 3. Albüm İçi Fotoğraf/Videolar
+	if redisURL != "" {
+		opt, err := redis.ParseURL(redisURL)
+		if err != nil {
+			log.Printf("Redis URL ayrıştırma hatası: %v", err)
+		} else {
+			rdb = redis.NewClient(opt)
+			log.Println("⚡ Upstash Redis bağlantısı yapılandırıldı.")
+		}
+	} else {
+		log.Println("⚠️ REDIS_URL bulunamadı, sistem sadece Supabase ile çalışacak.")
+	}
+
+	app := &App{DB: db, RDB: rdb}
+
+	http.HandleFunc("/api/v1/albums/hot", app.getHotAlbumsHandler)
 
 	port := ":8080"
 	fmt.Printf("🚀 Go Backend Sunucusu %s portunda çalışıyor...\n", port)
 	log.Fatal(http.ListenAndServe(port, nil))
 }
 
-// 1. Son 3 Günün Sıcak Albümlerini Getiren Fonksiyon
 func (app *App) getHotAlbumsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	cacheKey := "hot_albums_cache"
 
-	// SQL: Sadece created_at >= Son 3 Gün
+	// A) Önce Redis Cache Kontrol Et
+	if app.RDB != nil {
+		cachedData, err := app.RDB.Get(ctx, cacheKey).Result()
+		if err == nil && cachedData != "" {
+			// Cache bulundu! Doğrudan Redis'ten dön
+			w.Header().Set("X-Cache", "HIT_REDIS")
+			w.Write([]byte(cachedData))
+			return
+		}
+	}
+
+	// B) Cache yoksa Supabase Veritabanından Çek
 	query := `
 		SELECT id, title, COALESCE(cover_photo_url, ''), created_at
 		FROM albums
@@ -91,92 +104,24 @@ func (app *App) getHotAlbumsHandler(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&a.ID, &a.Title, &a.CoverPhotoURL, &a.CreatedAt); err != nil {
 			continue
 		}
-		a.IsHot = true // Sıcak veri bayrağı
+		a.IsHot = true
 		hotAlbums = append(hotAlbums, a)
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	responsePayload := map[string]interface{}{
 		"status": "success",
 		"type":   "HOT_DATA_CACHE",
 		"count":  len(hotAlbums),
 		"albums": hotAlbums,
-	})
-}
-
-// 2. 3 Günü Geçmiş Soğuk Albümleri Getiren Fonksiyon
-func (app *App) getColdAlbumsHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	// SQL: 3 günden eski veriler (Sayfalamalı - LIMIT 20)
-	query := `
-		SELECT id, title, COALESCE(cover_photo_url, ''), created_at
-		FROM albums
-		WHERE created_at < NOW() - INTERVAL '3 days'
-		ORDER BY created_at DESC
-		LIMIT 20;
-	`
-
-	rows, err := app.DB.Query(query)
-	if err != nil {
-		http.Error(w, "Veri çekme hatası: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	var coldAlbums []Album
-	for rows.Next() {
-		var a Album
-		if err := rows.Scan(&a.ID, &a.Title, &a.CoverPhotoURL, &a.CreatedAt); err != nil {
-			continue
-		}
-		a.IsHot = false
-		coldAlbums = append(coldAlbums, a)
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status": "success",
-		"type":   "COLD_DATA_ARCHIVE",
-		"count":  len(coldAlbums),
-		"albums": coldAlbums,
-	})
-}
+	jsonBytes, _ := json.Marshal(responsePayload)
 
-// 3. Seçilen Albümün İçindeki Tüm Fotoğraf ve Videoları Listeleyen Fonksiyon
-func (app *App) getAlbumMediaHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	albumID := r.URL.Query().Get("album_id")
-
-	if albumID == "" {
-		http.Error(w, "album_id parametresi eksik", http.StatusBadRequest)
-		return
+	// C) Elde edilen veriyi 5 dakikalığına Redis'e kaydet
+	if app.RDB != nil {
+		app.RDB.Set(ctx, cacheKey, jsonBytes, 5*time.Minute)
 	}
 
-	query := `
-		SELECT id, album_id, url, thumbnail_url, media_type, duration_seconds, width, height
-		FROM media
-		WHERE album_id = $1
-		ORDER BY created_at ASC;
-	`
-
-	rows, err := app.DB.Query(query, albumID)
-	if err != nil {
-		http.Error(w, "Medya verileri çekilemedi", http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	var mediaList []Media
-	for rows.Next() {
-		var m Media
-		if err := rows.Scan(&m.ID, &m.AlbumID, &m.URL, &m.ThumbnailURL, &m.MediaType, &m.DurationSeconds, &m.Width, &m.Height); err != nil {
-			continue
-		}
-		mediaList = append(mediaList, m)
-	}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"album_id": albumID,
-		"count":    len(mediaList),
-		"media":    mediaList,
-	})
+	w.Header().Set("X-Cache", "MISS_SUPABASE")
+	w.Write(jsonBytes)
 }
