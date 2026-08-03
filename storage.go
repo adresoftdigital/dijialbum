@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -23,9 +25,20 @@ func uploadToSupabaseStorage(path string, data []byte, contentType string) (stri
 		contentType = "application/octet-stream"
 	}
 
-	url := fmt.Sprintf("%s/storage/v1/object/media/%s", supabaseURL, path)
+	// path başında / olmasın
+	path = strings.TrimPrefix(path, "/")
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	// Her segmenti encode et (UUID ve uzantı güvenli kalsın)
+	parts := strings.Split(path, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	encodedPath := strings.Join(parts, "/")
+
+	uploadURL := fmt.Sprintf("%s/storage/v1/object/media/%s", supabaseURL, encodedPath)
+	log.Printf("📤 Storage upload URL: %s", uploadURL)
+
+	req, err := http.NewRequest(http.MethodPut, uploadURL, bytes.NewReader(data))
 	if err != nil {
 		return "", err
 	}
@@ -46,7 +59,7 @@ func uploadToSupabaseStorage(path string, data []byte, contentType string) (stri
 		return "", fmt.Errorf("storage %d: %s", resp.StatusCode, string(body))
 	}
 
-	publicURL := fmt.Sprintf("%s/storage/v1/object/public/media/%s", supabaseURL, path)
+	publicURL := fmt.Sprintf("%s/storage/v1/object/public/media/%s", supabaseURL, encodedPath)
 	return publicURL, nil
 }
 
