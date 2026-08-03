@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/google/uuid"
@@ -132,6 +133,8 @@ func (app *App) saveOneMedia(fh *multipart.FileHeader, albumID string) (map[stri
 	if err != nil {
 		return nil, fmt.Errorf("db: %w", err)
 	}
+
+	runtime.GC()
 
 	return map[string]interface{}{
 		"id":            mediaID,

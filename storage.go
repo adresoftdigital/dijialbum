@@ -73,6 +73,11 @@ func createThumbnail(original []byte) (thumb []byte, width, height int, err erro
 	width = bounds.Dx()
 	height = bounds.Dy()
 
+	// Çok büyükse önce max 1200px'e indir (RAM koruması)
+	if width > 1200 || height > 1200 {
+		img = imaging.Fit(img, 1200, 1200, imaging.Lanczos)
+	}
+
 	resized := imaging.Resize(img, 400, 0, imaging.Lanczos)
 
 	var buf bytes.Buffer
