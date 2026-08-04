@@ -33,6 +33,17 @@ func (app *App) uploadMediaHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Yüz embedding'leri (Flutter'dan JSON string olarak gelir)
+	// Örnek: "[[0.12,-0.05,...128 sayı...]]"
+	embeddingsJSON := r.FormValue("embeddings")
+	var embeddings [][]float64
+	if embeddingsJSON != "" {
+		if err := json.Unmarshal([]byte(embeddingsJSON), &embeddings); err != nil {
+			log.Printf("⚠️ embeddings JSON parse hatası: %v", err)
+			embeddings = nil
+		}
+	}
+
 	// Albüm kontrolü
 	var exists bool
 	err := app.DB.QueryRow(
@@ -54,18 +65,26 @@ func (app *App) uploadMediaHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var uploaded []map[string]interface{}
+	var errors []string
 
 	for _, fh := range files {
-		item, err := app.saveOneMedia(fh, albumID)
+		item, err := app.saveOneMedia(fh, albumID, embeddings)
 		if err != nil {
-			log.Printf("❌ %s yüklenemedi: %v", fh.Filename, err)
+			msg := fmt.Sprintf("%s: %v", fh.Filename, err)
+			log.Printf("❌ %s", msg)
+			errors = append(errors, msg)
 			continue
 		}
 		uploaded = append(uploaded, item)
 	}
 
 	if len(uploaded) == 0 {
-		http.Error(w, `{"status":"error","message":"Hiçbir dosya yüklenemedi"}`, http.StatusInternalServerError)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "error",
+			"message": "Hiçbir dosya yüklenemedi",
+			"errors":  errors,
+		})
 		return
 	}
 
@@ -73,10 +92,16 @@ func (app *App) uploadMediaHandler(w http.ResponseWriter, r *http.Request) {
 		"status": "success",
 		"count":  len(uploaded),
 		"media":  uploaded,
+		"errors": errors,
 	})
 }
 
-func (app *App) saveOneMedia(fh *multipart.FileHeader, albumID string) (map[string]interface{}, error) {
+func (app *App) saveOneMedia(
+	fh *multipart.FileHeader,
+	albumID string,
+	embeddings [][]float64,
+) (map[string]interface{}, error) {
+
 	src, err := fh.Open()
 	if err != nil {
 		return nil, err
@@ -132,6 +157,11 @@ func (app *App) saveOneMedia(fh *multipart.FileHeader, albumID string) (map[stri
 
 	if err != nil {
 		return nil, fmt.Errorf("db: %w", err)
+	}
+
+	// ✅ Yüz embedding'lerini kaydet (sadece fotoğraflarda)
+	if !isVideo && len(embeddings) > 0 {
+		app.saveFaceEmbeddings(mediaID, albumID, embeddings)
 	}
 
 	runtime.GC()
