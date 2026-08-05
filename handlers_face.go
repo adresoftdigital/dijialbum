@@ -10,8 +10,8 @@ import (
 
 type faceSearchRequest struct {
 	AlbumID   string    `json:"album_id"`
-	Embedding []float64 `json:"embedding"` // 128 boyut
-	Threshold float64   `json:"threshold"` // opsiyonel, default 0.45
+	Embedding []float64 `json:"embedding"`
+	Threshold float64   `json:"threshold"`
 	Limit     int       `json:"limit"`
 }
 
@@ -34,14 +34,13 @@ func (app *App) faceSearchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Threshold <= 0 || req.Threshold > 1 {
-		req.Threshold = 0.45
+	if req.Threshold <= 0 || req.Threshold > 2 {
+		req.Threshold = 0.42
 	}
 	if req.Limit < 1 || req.Limit > 100 {
 		req.Limit = 50
 	}
 
-	// vector literal: [0.1,0.2,...]
 	parts := make([]string, len(req.Embedding))
 	for i, v := range req.Embedding {
 		parts[i] = strconv.FormatFloat(v, 'f', 8, 64)
@@ -49,10 +48,9 @@ func (app *App) faceSearchHandler(w http.ResponseWriter, r *http.Request) {
 	vecLiteral := "[" + strings.Join(parts, ",") + "]"
 
 	rows, err := app.DB.Query(`
-		SELECT media_id, url, COALESCE(thumbnail_url,''), COALESCE(media_type,'photo'), similarity
-		FROM match_faces($1::vector, $2::uuid, $3, $4)
+		SELECT media_id, url, COALESCE(thumbnail_url, ''), COALESCE(media_type, 'photo'), distance
+		FROM match_faces($1::vector, $2::uuid, $3::float, $4::int)
 	`, vecLiteral, req.AlbumID, req.Threshold, req.Limit)
-
 	if err != nil {
 		log.Printf("❌ faceSearch: %v", err)
 		http.Error(w, `{"status":"error","message":"Arama hatası"}`, http.StatusInternalServerError)
@@ -66,20 +64,25 @@ func (app *App) faceSearchHandler(w http.ResponseWriter, r *http.Request) {
 		ThumbnailURL string  `json:"thumbnail_url"`
 		MediaType    string  `json:"media_type"`
 		IsVideo      bool    `json:"is_video"`
-		Similarity   float64 `json:"similarity"`
+		Distance     float64 `json:"distance"`
 	}
 
 	var matches []matchItem
 	for rows.Next() {
 		var m matchItem
 		var mediaType string
-		if err := rows.Scan(&m.ID, &m.URL, &m.ThumbnailURL, &mediaType, &m.Similarity); err != nil {
+
+		err := rows.Scan(&m.ID, &m.URL, &m.ThumbnailURL, &mediaType, &m.Distance)
+		if err != nil {
+			log.Printf("⚠️ scan: %v", err)
 			continue
 		}
+
 		m.MediaType = mediaType
 		m.IsVideo = mediaType == "video"
 		matches = append(matches, m)
 	}
+
 	if matches == nil {
 		matches = []matchItem{}
 	}
