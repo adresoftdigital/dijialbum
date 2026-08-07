@@ -99,6 +99,7 @@ func main() {
 		w.Write([]byte(`{"status":"ok","message":"DijiAlbum Go API Aktif"}`))
 	})
 
+	mux.HandleFunc("/api/v1/media/delete", app.deleteMediaHandler)
 	mux.HandleFunc("/api/v1/face-search", app.faceSearchHandler)
 	mux.HandleFunc("/api/v1/media/upload", app.uploadMediaHandler)
 	mux.HandleFunc("/api/v1/albums/hot", app.getHotAlbumsHandler)

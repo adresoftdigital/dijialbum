@@ -13,6 +13,44 @@ import (
 	"github.com/disintegration/imaging"
 )
 
+func deleteFromSupabaseStorage(publicURL string) error {
+	supabaseURL := strings.TrimRight(os.Getenv("SUPABASE_URL"), "/")
+	serviceKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+	if supabaseURL == "" || serviceKey == "" || publicURL == "" {
+		return fmt.Errorf("eksik bilgi")
+	}
+
+	// public URL:
+	// https://xxx.supabase.co/storage/v1/object/public/media/{path}
+	marker := "/storage/v1/object/public/media/"
+	idx := strings.Index(publicURL, marker)
+	if idx < 0 {
+		return fmt.Errorf("path çıkarılamadı: %s", publicURL)
+	}
+	objectPath := publicURL[idx+len(marker):]
+
+	deleteURL := fmt.Sprintf("%s/storage/v1/object/media/%s", supabaseURL, objectPath)
+
+	req, err := http.NewRequest(http.MethodDelete, deleteURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+serviceKey)
+	req.Header.Set("apikey", serviceKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 && resp.StatusCode != 404 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("storage delete %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 func uploadToSupabaseStorage(path string, data []byte, contentType string) (string, error) {
 	supabaseURL := strings.TrimRight(os.Getenv("SUPABASE_URL"), "/")
 	serviceKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
