@@ -104,3 +104,68 @@ func (app *App) myAlbumsHandler(w http.ResponseWriter, r *http.Request) {
 		"albums": list,
 	})
 }
+
+type createAlbumRequest struct {
+	UserID          string `json:"user_id"`
+	Title           string `json:"title"`
+	Description     string `json:"description"`
+	BackgroundColor string `json:"background_color"`
+}
+
+func (app *App) createAlbumHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"status":"error","message":"Sadece POST"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req createAlbumRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"status":"error","message":"JSON hatası"}`, http.StatusBadRequest)
+		return
+	}
+
+	req.Title = strings.TrimSpace(req.Title)
+	req.Description = strings.TrimSpace(req.Description)
+	req.UserID = strings.TrimSpace(req.UserID)
+	req.BackgroundColor = strings.TrimSpace(req.BackgroundColor)
+
+	if req.Title == "" || req.UserID == "" {
+		http.Error(w, `{"status":"error","message":"title ve user_id zorunlu"}`, http.StatusBadRequest)
+		return
+	}
+	if req.BackgroundColor == "" {
+		req.BackgroundColor = "#1A73E8"
+	}
+	if !strings.HasPrefix(req.BackgroundColor, "#") {
+		req.BackgroundColor = "#" + req.BackgroundColor
+	}
+
+	var id string
+	err := app.DB.QueryRow(`
+		INSERT INTO public.albums (title, description, background_color, user_id, cover_photo_url)
+		VALUES ($1, $2, $3, $4::uuid, '')
+		RETURNING id::text
+	`, req.Title, req.Description, req.BackgroundColor, req.UserID).Scan(&id)
+
+	if err != nil {
+		log.Printf("❌ createAlbum: %v", err)
+		// description / background_color yoksa minimal insert
+		err2 := app.DB.QueryRow(`
+			INSERT INTO public.albums (title, user_id, cover_photo_url)
+			VALUES ($1, $2::uuid, '')
+			RETURNING id::text
+		`, req.Title, req.UserID).Scan(&id)
+		if err2 != nil {
+			log.Printf("❌ createAlbum fallback: %v", err2)
+			http.Error(w, `{"status":"error","message":"Albüm oluşturulamadı"}`, http.StatusInternalServerError)
+			return
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "success",
+		"album_id": id,
+		"title":    req.Title,
+	})
+}

@@ -108,6 +108,7 @@ func main() {
 	mux.HandleFunc("/api/v1/albums/hot", app.getHotAlbumsHandler)
 	mux.HandleFunc("/api/v1/album-detail", app.getAlbumDetailHandler)
 	mux.HandleFunc("/api/v1/my-albums", app.myAlbumsHandler)
+	mux.HandleFunc("/api/v1/albums", app.createAlbumHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
