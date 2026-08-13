@@ -97,10 +97,10 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok","message":"DijiAlbum Go API Aktif"}`))
-	}),
-    mux.HandleFunc("/api/v1/auth/register", app.authRegisterHandler)
-    mux.HandleFunc("/api/v1/auth/verify", app.authVerifyHandler)
-    mux.HandleFunc("/api/v1/auth/login", app.authLoginHandler)
+	})
+	mux.HandleFunc("/api/v1/auth/register", app.authRegisterHandler)
+	mux.HandleFunc("/api/v1/auth/verify", app.authVerifyHandler)
+	mux.HandleFunc("/api/v1/auth/login", app.authLoginHandler)
 	mux.HandleFunc("/api/v1/album-social", app.listSocialPostsHandler)
 	mux.HandleFunc("/api/v1/media/delete", app.deleteMediaHandler)
 	mux.HandleFunc("/api/v1/face-search", app.faceSearchHandler)
