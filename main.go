@@ -109,6 +109,7 @@ func main() {
 	mux.HandleFunc("/api/v1/album-detail", app.getAlbumDetailHandler)
 	mux.HandleFunc("/api/v1/my-albums", app.myAlbumsHandler)
 	mux.HandleFunc("/api/v1/albums", app.createAlbumHandler)
+	mux.HandleFunc("/api/v1/auth/change-password", app.changePasswordHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {

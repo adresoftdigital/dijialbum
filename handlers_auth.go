@@ -277,4 +277,89 @@ func (app *App) authLoginHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// map typo fix - use map[string]string in login error above
+type changePasswordRequest struct {
+	AccessToken     string `json:"access_token"`
+	Email           string `json:"email"`
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+func (app *App) changePasswordHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"status":"error","message":"Sadece POST"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req changePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"status":"error","message":"JSON hatası"}`, http.StatusBadRequest)
+		return
+	}
+	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	if req.Email == "" || req.CurrentPassword == "" || len(req.NewPassword) < 6 {
+		http.Error(w, `{"status":"error","message":"Geçersiz istek"}`, http.StatusBadRequest)
+		return
+	}
+
+	// 1) Mevcut şifre doğru mu?
+	loginBody, _ := json.Marshal(map[string]string{
+		"email": req.Email, "password": req.CurrentPassword,
+	})
+	loginReq, _ := http.NewRequest(http.MethodPost,
+		supabaseAuthBase()+"/token?grant_type=password", bytes.NewReader(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginReq.Header.Set("apikey", supabaseAnonKey())
+	loginReq.Header.Set("Authorization", "Bearer "+supabaseAnonKey())
+	loginResp, err := http.DefaultClient.Do(loginReq)
+	if err != nil || loginResp.StatusCode >= 300 {
+		if loginResp != nil {
+			loginResp.Body.Close()
+		}
+		http.Error(w, `{"status":"error","message":"Mevcut şifre hatalı"}`, http.StatusUnauthorized)
+		return
+	}
+	loginBytes, _ := io.ReadAll(loginResp.Body)
+	loginResp.Body.Close()
+	var loginData map[string]interface{}
+	_ = json.Unmarshal(loginBytes, &loginData)
+	user, _ := loginData["user"].(map[string]interface{})
+	userID, _ := user["id"].(string)
+	accessToken, _ := loginData["access_token"].(string)
+	if accessToken == "" {
+		accessToken = req.AccessToken
+	}
+
+	// 2) Yeni şifre (Supabase user update)
+	updBody, _ := json.Marshal(map[string]string{"password": req.NewPassword})
+	updReq, _ := http.NewRequest(http.MethodPut, supabaseAuthBase()+"/user", bytes.NewReader(updBody))
+	updReq.Header.Set("Content-Type", "application/json")
+	updReq.Header.Set("apikey", supabaseAnonKey())
+	updReq.Header.Set("Authorization", "Bearer "+accessToken)
+	updResp, err := http.DefaultClient.Do(updReq)
+	if err != nil {
+		http.Error(w, `{"status":"error","message":"Şifre güncellenemedi"}`, http.StatusBadGateway)
+		return
+	}
+	defer updResp.Body.Close()
+	if updResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(updResp.Body)
+		log.Printf("change-password: %s", string(b))
+		http.Error(w, `{"status":"error","message":"Şifre güncellenemedi"}`, http.StatusBadRequest)
+		return
+	}
+
+	// 3) password_version++
+	if userID != "" {
+		_, _ = app.DB.Exec(`
+			UPDATE public.profiles
+			SET password_version = password_version + 1, updated_at = NOW()
+			WHERE id::text = $1
+		`, userID)
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": "Şifre güncellendi. Lütfen tekrar giriş yapın.",
+	})
+}
