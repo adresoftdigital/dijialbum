@@ -110,6 +110,10 @@ func main() {
 	mux.HandleFunc("/api/v1/my-albums", app.myAlbumsHandler)
 	mux.HandleFunc("/api/v1/albums", app.createAlbumHandler)
 	mux.HandleFunc("/api/v1/auth/change-password", app.changePasswordHandler)
+	mux.HandleFunc("/api/v1/pending/upload", app.pendingUploadHandler)
+	mux.HandleFunc("/api/v1/pending/approve", app.pendingApproveHandler)
+	mux.HandleFunc("/api/v1/pending/reject", app.pendingRejectHandler)
+	mux.HandleFunc("/api/v1/pending", app.pendingListHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
