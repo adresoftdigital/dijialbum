@@ -114,6 +114,8 @@ func main() {
 	mux.HandleFunc("/api/v1/pending/approve", app.pendingApproveHandler)
 	mux.HandleFunc("/api/v1/pending/reject", app.pendingRejectHandler)
 	mux.HandleFunc("/api/v1/pending", app.pendingListHandler)
+	mux.HandleFunc("/api/v1/album-social/create", app.createSocialPostHandler)
+	mux.HandleFunc("/api/v1/album-social/delete", app.deleteSocialPostHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
