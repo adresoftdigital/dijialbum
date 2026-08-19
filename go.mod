@@ -10,5 +10,6 @@ require (
 	github.com/lib/pq v1.12.3 // indirect
 	github.com/redis/go-redis/v9 v9.21.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
+	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/image v0.0.0-20191009234506-e7c1f5e7dbb8 // indirect
 )

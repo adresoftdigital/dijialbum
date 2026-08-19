@@ -116,6 +116,10 @@ func main() {
 	mux.HandleFunc("/api/v1/pending", app.pendingListHandler)
 	mux.HandleFunc("/api/v1/album-social/create", app.createSocialPostHandler)
 	mux.HandleFunc("/api/v1/album-social/delete", app.deleteSocialPostHandler)
+	mux.HandleFunc("/api/v1/album-security", app.getAlbumSecurityHandler)     // GET
+	mux.HandleFunc("/api/v1/album-security/set", app.setAlbumSecurityHandler) // POST
+	mux.HandleFunc("/api/v1/album-security/verify-pin", app.verifyAlbumPinHandler)
+	mux.HandleFunc("/api/v1/album-security/verify-face", app.verifyAlbumFaceHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
