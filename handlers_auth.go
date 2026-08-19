@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -362,4 +363,165 @@ func (app *App) changePasswordHandler(w http.ResponseWriter, r *http.Request) {
 		"status":  "success",
 		"message": "Şifre güncellendi. Lütfen tekrar giriş yapın.",
 	})
+}
+
+type forgotRequest struct {
+	Email string `json:"email"`
+}
+
+type resetRequest struct {
+	Email       string `json:"email"`
+	Token       string `json:"token"`
+	NewPassword string `json:"new_password"`
+}
+
+func (app *App) forgotPasswordHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"status":"error","message":"Sadece POST"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req forgotRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"status":"error","message":"JSON hatası"}`, http.StatusBadRequest)
+		return
+	}
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	if email == "" || !strings.Contains(email, "@") {
+		http.Error(w, `{"status":"error","message":"Geçerli e-posta girin"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Kullanıcı var mı? (profiles veya auth — service role ile opsiyonel)
+	code := fmt.Sprintf("%06d", time.Now().UnixNano()%1000000)
+	if code == "000000" {
+		code = "123456"
+	}
+	exp := time.Now().UTC().Add(15 * time.Minute)
+
+	_, _ = app.DB.Exec(`UPDATE public.password_reset_codes SET used = true WHERE email = $1 AND used = false`, email)
+	_, err := app.DB.Exec(`
+		INSERT INTO public.password_reset_codes (email, code, expires_at)
+		VALUES ($1, $2, $3)
+	`, email, code, exp)
+	if err != nil {
+		log.Printf("forgot insert: %v", err)
+		http.Error(w, `{"status":"error","message":"Kod oluşturulamadı"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// SMTP yok: kodu sunucu loguna yaz (Render logs)
+	log.Printf("🔐 PASSWORD RESET CODE for %s => %s (15 dk)", email, code)
+
+	resp := map[string]interface{}{
+		"status":  "success",
+		"message": "Doğrulama kodu oluşturuldu. Geliştirme: sunucu loguna bakın.",
+	}
+	// Sadece development'ta client'a da ver (yayında KALDIR)
+	if os.Getenv("APP_ENV") == "development" || os.Getenv("APP_ENV") == "dev" {
+		resp["debug_code"] = code
+	}
+
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (app *App) resetPasswordHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"status":"error","message":"Sadece POST"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req resetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"status":"error","message":"JSON hatası"}`, http.StatusBadRequest)
+		return
+	}
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	token := strings.TrimSpace(req.Token)
+	if email == "" || token == "" || len(req.NewPassword) < 6 {
+		http.Error(w, `{"status":"error","message":"E-posta, kod ve yeni şifre (min 6) zorunlu"}`, http.StatusBadRequest)
+		return
+	}
+
+	var dbCode string
+	var exp time.Time
+	var used bool
+	err := app.DB.QueryRow(`
+		SELECT code, expires_at, used FROM public.password_reset_codes
+		WHERE email = $1 AND used = false
+		ORDER BY created_at DESC LIMIT 1
+	`, email).Scan(&dbCode, &exp, &used)
+	if err != nil || used || time.Now().UTC().After(exp) || dbCode != token {
+		http.Error(w, `{"status":"error","message":"Kod geçersiz veya süresi dolmuş"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Auth user id — service role
+	userID, err := app.findAuthUserIDByEmail(email)
+	if err != nil || userID == "" {
+		http.Error(w, `{"status":"error","message":"Kullanıcı bulunamadı"}`, http.StatusNotFound)
+		return
+	}
+
+	if err := app.adminUpdateUserPassword(userID, req.NewPassword); err != nil {
+		log.Printf("admin password: %v", err)
+		http.Error(w, `{"status":"error","message":"Şifre güncellenemedi"}`, http.StatusBadGateway)
+		return
+	}
+
+	_, _ = app.DB.Exec(`UPDATE public.password_reset_codes SET used = true WHERE email = $1`, email)
+	_, _ = app.DB.Exec(`
+		UPDATE public.profiles
+		SET password_version = COALESCE(password_version, 0) + 1
+		WHERE id::text = $1
+	`, userID)
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": "Şifre güncellendi",
+	})
+}
+
+func (app *App) findAuthUserIDByEmail(email string) (string, error) {
+	// 1) profiles'ta email varsa
+	var id string
+	err := app.DB.QueryRow(`SELECT id::text FROM public.profiles WHERE email = $1 LIMIT 1`, email).Scan(&id)
+	if err == nil && id != "" {
+		return id, nil
+	}
+	// 2) auth.users (service role DB ile genelde erişilir)
+	err = app.DB.QueryRow(`SELECT id::text FROM auth.users WHERE email = $1 LIMIT 1`, email).Scan(&id)
+	return id, err
+}
+
+func (app *App) adminUpdateUserPassword(userID, newPassword string) error {
+	body, _ := json.Marshal(map[string]interface{}{
+		"password": newPassword,
+	})
+	url := strings.TrimRight(os.Getenv("SUPABASE_URL"), "/")
+	// SUPABASE_URL sende rest/v1 ile bitiyorsa düzelt:
+	url = strings.Replace(url, "/rest/v1", "", 1)
+	url = strings.TrimRight(url, "/") + "/auth/v1/admin/users/" + userID
+
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	key := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", key)
+	req.Header.Set("Authorization", "Bearer "+key)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("admin update %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
 }

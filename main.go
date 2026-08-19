@@ -120,6 +120,9 @@ func main() {
 	mux.HandleFunc("/api/v1/album-security/set", app.setAlbumSecurityHandler) // POST
 	mux.HandleFunc("/api/v1/album-security/verify-pin", app.verifyAlbumPinHandler)
 	mux.HandleFunc("/api/v1/album-security/verify-face", app.verifyAlbumFaceHandler)
+	mux.HandleFunc("/api/v1/albums/delete", app.deleteAlbumHandler)
+	mux.HandleFunc("/api/v1/auth/forgot-password", app.forgotPasswordHandler)
+	mux.HandleFunc("/api/v1/auth/reset-password", app.resetPasswordHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {

@@ -169,3 +169,82 @@ func (app *App) createAlbumHandler(w http.ResponseWriter, r *http.Request) {
 		"title":    req.Title,
 	})
 }
+
+type deleteAlbumRequest struct {
+	AlbumID string `json:"album_id"`
+	UserID  string `json:"user_id"`
+}
+
+func (app *App) deleteAlbumHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"status":"error","message":"Sadece POST"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req deleteAlbumRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"status":"error","message":"JSON hatası"}`, http.StatusBadRequest)
+		return
+	}
+	req.AlbumID = strings.TrimSpace(req.AlbumID)
+	req.UserID = strings.TrimSpace(req.UserID)
+	if req.AlbumID == "" {
+		http.Error(w, `{"status":"error","message":"album_id zorunlu"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.UserID != "" {
+		var owner string
+		err := app.DB.QueryRow(
+			`SELECT COALESCE(user_id::text, '') FROM public.albums WHERE id::text = $1`,
+			req.AlbumID,
+		).Scan(&owner)
+		if err != nil {
+			http.Error(w, `{"status":"error","message":"Albüm bulunamadı"}`, http.StatusNotFound)
+			return
+		}
+		if owner != "" && owner != req.UserID {
+			http.Error(w, `{"status":"error","message":"Yetkisiz"}`, http.StatusForbidden)
+			return
+		}
+	}
+
+	// Bağlı kayıtlar (tablo yoksa hata loglanır, devam)
+	if _, err := app.DB.Exec(`DELETE FROM public.face_embeddings WHERE album_id::text = $1`, req.AlbumID); err != nil {
+		log.Printf("delete face_embeddings: %v", err)
+	}
+	if _, err := app.DB.Exec(`DELETE FROM public.pending_media WHERE album_id::text = $1`, req.AlbumID); err != nil {
+		log.Printf("delete pending_media: %v", err)
+	}
+	if _, err := app.DB.Exec(`DELETE FROM public.album_social_posts WHERE album_id::text = $1`, req.AlbumID); err != nil {
+		log.Printf("delete social: %v", err)
+	}
+	if _, err := app.DB.Exec(`DELETE FROM public.album_access_logs WHERE album_id::text = $1`, req.AlbumID); err != nil {
+		log.Printf("delete access_logs: %v", err)
+	}
+	if _, err := app.DB.Exec(`DELETE FROM public.media WHERE album_id::text = $1`, req.AlbumID); err != nil {
+		log.Printf("delete media: %v", err)
+	}
+
+	res, err := app.DB.Exec(`DELETE FROM public.albums WHERE id::text = $1`, req.AlbumID)
+	if err != nil {
+		log.Printf("delete album: %v", err)
+		http.Error(w, `{"status":"error","message":"Albüm silinemedi"}`, http.StatusInternalServerError)
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		http.Error(w, `{"status":"error","message":"Albüm bulunamadı"}`, http.StatusNotFound)
+		return
+	}
+
+	// Redis cache (varsa)
+	if app.RDB != nil {
+		_ = app.RDB.Del(ctx, "album:"+req.AlbumID).Err()
+	}
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": "Albüm ve bağlı veriler silindi",
+	})
+}
