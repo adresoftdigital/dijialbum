@@ -531,7 +531,7 @@ func (app *App) adminUpdateUserPassword(userID, newPassword string) error {
 }
 
 func (app *App) sendPasswordResetEmail(toEmail, code string) error {
-	apiKey := strings.TrimSpace(os.Getenv("re_2kAR7doN_JMbmm8Lcb7RDXy8nnJE5r3dv"))
+	apiKey := strings.TrimSpace(os.Getenv("re_AUAvNx9Y_DuE7ZX3ZB5HnvPPqAmBtMgtH"))
 	if apiKey == "" {
 		log.Printf("RESEND_API_KEY yok — mail atılmadı. Kod: %s → %s", toEmail, code)
 		return fmt.Errorf("RESEND_API_KEY tanımlı değil")
