@@ -411,16 +411,20 @@ func (app *App) forgotPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SMTP yok: kodu sunucu loguna yaz (Render logs)
 	log.Printf("🔐 PASSWORD RESET CODE for %s => %s (15 dk)", email, code)
+
+	mailErr := app.sendPasswordResetEmail(email, code)
 
 	resp := map[string]interface{}{
 		"status":  "success",
-		"message": "Doğrulama kodu oluşturuldu. Geliştirme: sunucu loguna bakın.",
+		"message": "Kod e-posta adresinize gönderildi.",
 	}
-	// Sadece development'ta client'a da ver (yayında KALDIR)
-	if os.Getenv("APP_ENV") == "development" || os.Getenv("APP_ENV") == "dev" {
-		resp["debug_code"] = code
+	if mailErr != nil {
+		resp["message"] = "Kod oluşturuldu; e-posta şu an gönderilemedi. Log kontrol edin."
+		// Geliştirme kolaylığı
+		if os.Getenv("APP_ENV") == "development" || os.Getenv("APP_ENV") == "dev" {
+			resp["debug_code"] = code
+		}
 	}
 
 	json.NewEncoder(w).Encode(resp)
@@ -523,5 +527,53 @@ func (app *App) adminUpdateUserPassword(userID, newPassword string) error {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("admin update %d: %s", resp.StatusCode, string(b))
 	}
+	return nil
+}
+
+func (app *App) sendPasswordResetEmail(toEmail, code string) error {
+	apiKey := strings.TrimSpace(os.Getenv("RESEND_API_KEY"))
+	if apiKey == "" {
+		log.Printf("RESEND_API_KEY yok — mail atılmadı. Kod: %s → %s", toEmail, code)
+		return fmt.Errorf("RESEND_API_KEY tanımlı değil")
+	}
+
+	from := strings.TrimSpace(os.Getenv("MAIL_FROM"))
+	if from == "" {
+		from = "DijiAlbüm <onboarding@resend.dev>"
+	}
+
+	payload := map[string]interface{}{
+		"from":    from,
+		"to":      []string{toEmail},
+		"subject": "DijiAlbüm şifre sıfırlama kodu",
+		"html": fmt.Sprintf(`
+			<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#0F172A">
+			  <h2 style="margin:0 0 12px">DijiAlbüm</h2>
+			  <p style="color:#334155">Şifre sıfırlama kodun:</p>
+			  <p style="font-size:32px;font-weight:700;letter-spacing:8px;color:#1A73E8;margin:20px 0">%s</p>
+			  <p style="font-size:13px;color:#64748B">Kod 15 dakika geçerlidir. Bu isteği sen yapmadıysan yok say.</p>
+			</div>
+		`, code),
+	}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest(http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		log.Printf("Resend hata %d: %s", resp.StatusCode, string(b))
+		return fmt.Errorf("mail gönderilemedi: %s", string(b))
+	}
+	log.Printf("Mail gönderildi → %s", toEmail)
 	return nil
 }
